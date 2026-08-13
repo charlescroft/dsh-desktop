@@ -110,7 +110,8 @@ Prebuilt bundles are attached to the [Releases](https://github.com/charlescroft/
 ├── scripts/
 │   ├── fetch-node.mjs    stage Node 24 sidecar + bundled npm
 │   ├── make-icon.mjs     render the 1024 px app icon
-│   └── whale.svg         official DeepSeek whale mark (from dsh-web-frontend, MIT)
+│   ├── whale.svg         official DeepSeek whale mark (from dsh-web-frontend, MIT)
+│   └── github-release.mjs create a GitHub release and upload assets (GH_TOKEN)
 ├── ui/index.html         splash page (i18n: zh / en)
 └── src-tauri/
     ├── tauri.conf.json   Tauri config (window / bundling / resources)

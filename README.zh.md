@@ -121,7 +121,8 @@ cd <runtime 目录> && npm install --save-exact @deepseek-ai/dsh@<新版>
 ├── scripts/
 │   ├── fetch-node.mjs    下载/暂存 Node 24 sidecar 与内置 npm
 │   ├── make-icon.mjs     生成 1024px 应用图标
-│   └── whale.svg         官方 DeepSeek 鲸鱼标识（来自 dsh-web-frontend，MIT）
+│   ├── whale.svg         官方 DeepSeek 鲸鱼标识（来自 dsh-web-frontend，MIT）
+│   └── github-release.mjs 创建 GitHub release 并上传产物（GH_TOKEN）
 ├── ui/index.html         启动页（中英双语）
 └── src-tauri/
     ├── tauri.conf.json   Tauri 配置（窗口 / 打包 / 资源）
