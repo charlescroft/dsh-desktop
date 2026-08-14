@@ -16,17 +16,25 @@ const OUT = path.join(ROOT, "scripts", "app-icon.png");
 // DeepSeek brand blue
 const BLUE = "#4d6bfe";
 
+// macOS icon grid: the visible artwork must occupy ~80% of the canvas with
+// ~10% transparent margins on every side (Apple's icon design spec), or the
+// icon renders oversized in the Dock (opaque bounds hug the canvas edge).
+const SIZE = 1024; // canvas
+const GRID = Math.round(SIZE * 0.805); // 824: artwork tile
+const GRID_MARGIN = Math.round((SIZE - GRID) / 2); // 100
+const GRID_RADIUS = Math.round(GRID * 0.225); // Big Sur-style corner radius
+
+// Whale mark: occupies ~71% of the artwork tile, centered.
+const WHALE_SIZE = Math.round(GRID * 0.72); // 593
+
 // Official whale mark: strip the dark-mode media query, force white, and
 // render at the target size (viewBox stays 0 0 50 50, so coordinates hold).
-const WHALE_SIZE = 880;
 let whale = readFileSync(path.join(ROOT, "scripts", "whale.svg"), "utf8");
 whale = whale.replace(/<style>[\s\S]*?<\/style>/, "");
 whale = whale.replace(/fill="#000"/, `fill="#fff"`);
 whale = whale
   .replace(/width="50\.000000"/, `width="${WHALE_SIZE}"`)
   .replace(/height="50\.000000"/, `height="${WHALE_SIZE}"`);
-
-const SIZE = 1024;
 
 const background = sharp({
   create: {
@@ -46,13 +54,13 @@ const background = sharp({
               <stop offset="1" stop-color="#3b5bdb"/>
             </linearGradient>
           </defs>
-          <rect x="0" y="0" width="${SIZE}" height="${SIZE}" rx="232" fill="url(#bg)"/>
+          <rect x="${GRID_MARGIN}" y="${GRID_MARGIN}" width="${GRID}" height="${GRID}" rx="${GRID_RADIUS}" fill="url(#bg)"/>
         </svg>`
       ),
       top: 0,
       left: 0,
     },
-    // whale mark centered, ~86% of the canvas
+    // whale mark centered in the artwork tile
     {
       input: Buffer.from(whale),
       top: Math.round((SIZE - WHALE_SIZE) / 2),
