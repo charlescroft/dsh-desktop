@@ -2,13 +2,13 @@
 
 > [中文版](README.zh.md)
 
-A native macOS desktop app that wraps the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) web profile in a **Tauri 2** shell — no terminal, no browser tab.
+A native desktop app that wraps the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) web profile in a **Tauri 2** shell — no terminal, no browser tab. Ships for **macOS**, **Windows** and **Linux** (built per-platform on GitHub Actions).
 
 It solves three everyday annoyances:
 
 1. **No more manual `npx`** — double-click the app; the runtime is installed and the service is started for you.
-2. **No browser required** — the dsh UI renders in a native resizable window (WKWebView).
-3. **A real app** — Dock icon, native menu bar, and the server process starts/stops with the app.
+2. **No browser required** — the dsh UI renders in a native resizable window (WKWebView / WebView2 / WebKitGTK).
+3. **A real app** — Dock/taskbar icon, native menu bar, and the server process starts/stops with the app.
 
 ## How it works
 
@@ -94,14 +94,22 @@ Rebuild with `npm run build`. For fully automatic distribution, [Tauri Updater](
 
 ## Releases
 
-Prebuilt bundles are attached to the [Releases](https://github.com/charlescroft/dsh-desktop/releases) page: the `.dmg` installer and the `.app` zip.
+Prebuilt bundles are attached to the [Releases](https://github.com/charlescroft/dsh-desktop/releases) page, built automatically on GitHub Actions per platform:
+
+| Platform | Artifacts |
+| --- | --- |
+| macOS (Apple Silicon / Intel) | `.dmg`, `.app` |
+| Windows 10/11 x64 | `-setup.exe` (NSIS) |
+| Linux x64 | `.deb`, `.AppImage` |
+
+The [Build workflow](.github/workflows/build.yml) rebuilds and publishes them on every `v*` tag push.
 
 ## Known limitations
 
-- macOS arm64 only (Apple Silicon) for now; other platforms need `fetch-node` and binary-resolution extensions.
-- WKWebView cannot "download" attachments like a browser: use Service → Open in System Browser when you need to save files.
+- The dsh UI runs in WKWebView / WebView2 / WebKitGTK, which cannot "download" attachments like a browser: use Service → Open in System Browser when you need to save files.
 - If the dsh server crashes, the app stays on the splash; see Service → Open Logs Folder.
-- Run one instance at a time (all instances share `~/.dsh`).
+- Run one instance at a time (all instances share the `~/.dsh` data dir).
+- Linux: the `.deb`/`.AppImage` builds are produced by CI; WebKitGTK-based rendering may differ slightly from the browser version.
 
 ## Repository layout
 

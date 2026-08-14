@@ -2,13 +2,13 @@
 
 > [English](README.md)
 
-用 **Tauri 2** 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的 Web 版打包成 macOS 原生桌面应用——不需要终端，也不需要浏览器标签页。
+用 **Tauri 2** 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的 Web 版打包成原生桌面应用——不需要终端，也不需要浏览器标签页。支持 **macOS / Windows / Linux**（由 GitHub Actions 在各平台原生构建）。
 
 解决日常使用的三个痛点：
 
 1. **不用再手动 `npx`** —— 双击 App 即自动安装/启动运行时并拉起服务；
-2. **不用依赖浏览器** —— Web 界面渲染在原生窗口里（可缩放、可最大化）；
-3. **独立应用** —— Dock 图标、原生菜单栏，服务进程随应用启停。
+2. **不用依赖浏览器** —— Web 界面渲染在原生窗口里（WKWebView / WebView2 / WebKitGTK，可缩放、可最大化）；
+3. **独立应用** —— Dock/任务栏图标、原生菜单栏，服务进程随应用启停。
 
 ## 架构
 
@@ -103,16 +103,23 @@ cd <runtime 目录> && npm install --save-exact @deepseek-ai/dsh@<新版>
 
 ## 发行版
 
-预编译产物挂在 [Releases](https://github.com/charlescroft/dsh-desktop/releases) 页面：
-`.dmg` 安装包与 `.app` 压缩包。
+预编译产物挂在 [Releases](https://github.com/charlescroft/dsh-desktop/releases) 页面，由 GitHub Actions 按平台自动构建：
+
+| 平台 | 产物 |
+| --- | --- |
+| macOS（Apple Silicon / Intel） | `.dmg`、`.app` |
+| Windows 10/11 x64 | `-setup.exe`（NSIS） |
+| Linux x64 | `.deb`、`.AppImage` |
+
+每次推送 `v*` 标签时，[Build workflow](.github/workflows/build.yml) 会自动重建并发布到 Releases。
 
 ## 已知限制
 
-- 仅支持 macOS arm64（Apple Silicon）；其他平台需扩展 `fetch-node` 与二进制解析。
-- WKWebView 不支持浏览器式"下载附件"行为：需要保存文件时用
+- WKWebView / WebView2 / WebKitGTK 不支持浏览器式"下载附件"行为：需要保存文件时用
   「在系统浏览器中打开」。
 - 若 dsh 服务器崩溃，应用会停在启动页；日志见「服务 → 打开日志目录」。
 - 同一时间建议只运行一个实例（所有实例共用 `~/.dsh`）。
+- Linux：`.deb` / `.AppImage` 由 CI 产出；WebKitGTK 渲染与浏览器版可能略有差异。
 
 ## 目录结构
 

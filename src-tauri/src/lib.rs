@@ -60,13 +60,17 @@ impl Paths {
             .path()
             .app_data_dir()
             .unwrap_or_else(|_| PathBuf::from("."));
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let home = app
+            .path()
+            .home_dir()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| PathBuf::from("."));
         let dsh_home = std::env::var("DSH_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(&home).join(".dsh"));
+            .unwrap_or_else(|_| home.join(".dsh"));
         let workspace = std::env::var("DSH_DESKTOP_WORKSPACE")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(&home));
+            .unwrap_or_else(|_| home);
         Self {
             app_data: app_data.clone(),
             runtime: app_data.join("runtime"),
@@ -76,6 +80,93 @@ impl Paths {
             npm_cache: app_data.join("npm-cache"),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Platform helpers
+// ---------------------------------------------------------------------------
+
+/// Open a URL or folder with the platform's default handler.
+#[cfg(target_os = "windows")]
+fn open_external(target: &str) {
+    let _ = Command::new("cmd")
+        .args(["/C", "start", "", target])
+        .spawn();
+}
+
+#[cfg(target_os = "macos")]
+fn open_external(target: &str) {
+    let _ = Command::new("/usr/bin/open").arg(target).spawn();
+}
+
+#[cfg(target_os = "linux")]
+fn open_external(target: &str) {
+    let _ = Command::new("xdg-open").arg(target).spawn();
+}
+
+/// Send a termination signal to a child process.
+#[cfg(target_os = "windows")]
+fn terminate(pid: u32) {
+    // /T kills the whole tree (node + shells it spawned), /F force.
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn terminate(pid: u32) {
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status();
+}
+
+/// The splash page URL of this app's own origin.
+#[cfg(target_os = "windows")]
+fn splash_url() -> &'static str {
+    "http://tauri.localhost/index.html"
+}
+
+#[cfg(not(target_os = "windows"))]
+fn splash_url() -> &'static str {
+    "tauri://localhost/index.html"
+}
+
+/// PATH list separator for the current platform.
+#[cfg_attr(debug_assertions, allow(dead_code))]
+#[cfg(target_os = "windows")]
+fn path_sep() -> char {
+    ';'
+}
+
+#[cfg(not(target_os = "windows"))]
+fn path_sep() -> char {
+    ':'
+}
+
+/// Candidate sidecar file names, most specific first.
+#[cfg_attr(debug_assertions, allow(dead_code))]
+#[cfg(target_os = "windows")]
+fn sidecar_names() -> Vec<String> {
+    vec!["node-x86_64-pc-windows-msvc.exe".into(), "node.exe".into()]
+}
+
+#[cfg(target_os = "macos")]
+fn sidecar_names() -> Vec<String> {
+    vec![
+        "node-aarch64-apple-darwin".into(),
+        "node-x86_64-apple-darwin".into(),
+        "node".into(),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn sidecar_names() -> Vec<String> {
+    vec![
+        "node-x86_64-unknown-linux-gnu".into(),
+        "node-aarch64-unknown-linux-gnu".into(),
+        "node".into(),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -147,13 +238,14 @@ impl ServerManager {
         {
             let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
             let res_dir = self.app.path().resource_dir().ok();
-            let mut candidates = vec![
-                exe_dir.join("node-aarch64-apple-darwin"),
-                exe_dir.join("node"),
-            ];
+            let mut candidates: Vec<PathBuf> = sidecar_names()
+                .iter()
+                .map(|n| exe_dir.join(n))
+                .collect();
             if let Some(r) = res_dir {
-                candidates.push(r.join("binaries").join("node-aarch64-apple-darwin"));
-                candidates.push(r.join("binaries").join("node"));
+                for n in sidecar_names() {
+                    candidates.push(r.join("binaries").join(n));
+                }
             }
             candidates.into_iter().find(|c| c.exists())
         }
@@ -164,7 +256,14 @@ impl ServerManager {
     fn npm_command(&self) -> Result<Command, String> {
         #[cfg(debug_assertions)]
         {
-            Ok(Command::new("npm"))
+            #[cfg(target_os = "windows")]
+            {
+                Ok(Command::new("npm.cmd"))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Ok(Command::new("npm"))
+            }
         }
         #[cfg(not(debug_assertions))]
         {
@@ -188,7 +287,10 @@ impl ServerManager {
             // `node` on PATH: prepend the bundled node's directory.
             if let Some(dir) = node.parent() {
                 let path = std::env::var("PATH").unwrap_or_default();
-                cmd.env("PATH", format!("{}:{}", dir.display(), path));
+                cmd.env(
+                    "PATH",
+                    format!("{}{}{}", dir.display(), path_sep(), path),
+                );
             }
             Ok(cmd)
         }
@@ -282,19 +384,22 @@ impl ServerManager {
             .current_dir(&self.paths.workspace)
             .env("DSH_HOME", &self.paths.dsh_home)
             .env("DSH_DESKTOP", "1")
-            .env("NODE_ENV", "production")
-            .env(
-                // GUI-launched apps get a minimal PATH; make the common
-                // user toolchains (Homebrew, /usr/local) available to the
-                // dsh server and the bash tools it spawns.
+            .env("NODE_ENV", "production");
+        #[cfg(not(target_os = "windows"))]
+        {
+            // GUI-launched apps get a minimal PATH; make the common
+            // user toolchains (Homebrew, /usr/local) available to the
+            // dsh server and the shell tools it spawns.
+            cmd.env(
                 "PATH",
                 format!(
                     "/opt/homebrew/bin:/usr/local/bin:{}",
-                    std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into())
+                    std::env::var("PATH")
+                        .unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into())
                 ),
-            )
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            );
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to start dsh service: {e}"))?;
 
@@ -342,11 +447,8 @@ impl ServerManager {
     pub fn stop(&self) {
         let mut guard = self.child.lock().unwrap();
         if let Some(child) = guard.as_mut() {
-            self.log("stopping dsh server (SIGTERM)");
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(child.id().to_string())
-                .status();
+            self.log("stopping dsh server");
+            terminate(child.id());
             let deadline = std::time::Instant::now() + Duration::from_secs(3);
             loop {
                 if let Ok(Some(_)) = child.try_wait() {
@@ -370,7 +472,7 @@ impl ServerManager {
         self.stop();
         // back to the splash while the new server boots
         if let Some(w) = self.app.get_webview_window("main") {
-            if let Ok(u) = Url::parse("tauri://localhost/index.html") {
+            if let Ok(u) = Url::parse(splash_url()) {
                 let _ = w.navigate(u);
             }
         }
@@ -581,11 +683,10 @@ fn boot_status(state: State<'_, ServerManager>) -> BootStatus {
 #[tauri::command]
 fn open_in_browser(state: State<'_, ServerManager>) -> Result<(), String> {
     match state.current_url() {
-        Some(url) => Command::new("/usr/bin/open")
-            .arg(&url)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
+        Some(url) => {
+            open_external(&url);
+            Ok(())
+        }
         None => Err("service not ready yet".into()),
     }
 }
@@ -647,7 +748,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 }
 
 fn open_folder(path: &Path) {
-    let _ = Command::new("/usr/bin/open").arg(path).spawn();
+    open_external(&path.display().to_string());
 }
 
 fn handle_menu_event(app: &AppHandle, id: &str) {
@@ -660,7 +761,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         "restart" => mgr.restart(),
         "open-browser" => match mgr.current_url() {
             Some(url) => {
-                let _ = Command::new("/usr/bin/open").arg(url).spawn();
+                open_external(&url);
             }
             None => {
                 let msg = if mgr.zh {

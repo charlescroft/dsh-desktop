@@ -1,14 +1,23 @@
 #!/usr/bin/env node
 /**
- * fetch-node.mjs — download the official Node.js distribution (macOS arm64)
- * and stage it for the Tauri bundle:
+ * fetch-node.mjs — download the official Node.js distribution for the current
+ * host platform and stage it for the Tauri bundle:
  *
- *   src-tauri/binaries/node-aarch64-apple-darwin   (the node binary, externalBin sidecar)
- *   src-tauri/nodedist/npm/                        (npm-cli.js + its node_modules, bundle resource)
+ *   src-tauri/binaries/node-<target-triple>[.exe]   (node binary, externalBin sidecar)
+ *   src-tauri/nodedist/npm/                          (npm-cli.js + its node_modules, bundle resource)
  *
+ * Supported hosts: darwin-arm64/x64, win32-x64, linux-x64/arm64.
  * The pinned major is read from NODE_MAJOR (default 24 = active LTS line).
  */
-import { createWriteStream, mkdirSync, rmSync, copyFileSync, chmodSync, existsSync } from "node:fs";
+import {
+  createWriteStream,
+  mkdirSync,
+  rmSync,
+  copyFileSync,
+  cpSync,
+  chmodSync,
+  existsSync,
+} from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -20,14 +29,56 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const BIN_DIR = path.join(ROOT, "src-tauri", "binaries");
 const NODE_DIST_DIR = path.join(ROOT, "src-tauri", "nodedist");
 const NPM_DEST = path.join(NODE_DIST_DIR, "npm");
-const NODE_BIN_DEST = path.join(BIN_DIR, "node-aarch64-apple-darwin");
 
 const MAJOR = process.env.NODE_MAJOR ?? "24";
 
-if (os.platform() !== "darwin" || os.arch() !== "arm64") {
-  console.error(`fetch-node: only darwin-arm64 is supported right now (got ${os.platform()}/${os.arch()})`);
+// host key -> { dist, archive, bin, npm, sidecar name }
+const PLATFORMS = {
+  "darwin-arm64": {
+    dist: "darwin-arm64",
+    ext: "tar.gz",
+    bin: "bin/node",
+    npm: "lib/node_modules/npm",
+    dest: "node-aarch64-apple-darwin",
+  },
+  "darwin-x64": {
+    dist: "darwin-x64",
+    ext: "tar.gz",
+    bin: "bin/node",
+    npm: "lib/node_modules/npm",
+    dest: "node-x86_64-apple-darwin",
+  },
+  "win32-x64": {
+    dist: "win-x64",
+    ext: "zip",
+    bin: "node.exe",
+    npm: "node_modules/npm",
+    dest: "node-x86_64-pc-windows-msvc.exe",
+  },
+  "linux-x64": {
+    dist: "linux-x64",
+    ext: "tar.gz",
+    bin: "bin/node",
+    npm: "lib/node_modules/npm",
+    dest: "node-x86_64-unknown-linux-gnu",
+  },
+  "linux-arm64": {
+    dist: "linux-arm64",
+    ext: "tar.gz",
+    bin: "bin/node",
+    npm: "lib/node_modules/npm",
+    dest: "node-aarch64-unknown-linux-gnu",
+  },
+};
+
+const host = `${os.platform()}-${os.arch()}`;
+const platform = PLATFORMS[host];
+if (!platform) {
+  console.error(`fetch-node: unsupported host ${host} (supported: ${Object.keys(PLATFORMS).join(", ")})`);
   process.exit(1);
 }
+
+const NODE_BIN_DEST = path.join(BIN_DIR, platform.dest);
 
 async function latestVersion(major) {
   const res = await fetch("https://nodejs.org/dist/index.json");
@@ -40,36 +91,40 @@ async function latestVersion(major) {
 
 async function main() {
   const version = await latestVersion(MAJOR);
-  console.log(`fetch-node: staging Node ${version} (darwin-arm64)`);
+  console.log(`fetch-node: staging Node ${version} for ${host}`);
   const bare = version.replace(/^v/, "");
-  const tarball = `node-v${bare}-darwin-arm64.tar.gz`;
-  const url = `https://nodejs.org/dist/v${bare}/${tarball}`;
+  const archive = `node-v${bare}-${platform.dist}.${platform.ext}`;
+  const url = `https://nodejs.org/dist/v${bare}/${archive}`;
 
-  const tmp = path.join(os.tmpdir(), `node-${version}`);
-  const tarballPath = path.join(tmp, tarball);
+  const tmp = path.join(os.tmpdir(), `node-${version}-${host}`);
+  const archivePath = path.join(tmp, archive);
   mkdirSync(tmp, { recursive: true });
-  rmSync(path.join(tmp, "extracted"), { recursive: true, force: true });
 
-  if (!existsSync(tarballPath)) {
+  if (!existsSync(archivePath)) {
     console.log(`fetch-node: downloading ${url} ...`);
     const res = await fetch(url);
     if (!res.ok) throw new Error(`download: HTTP ${res.status}`);
-    await pipeline(Readable.fromWeb(res.body), createWriteStream(tarballPath));
+    await pipeline(Readable.fromWeb(res.body), createWriteStream(archivePath));
   }
 
-  execFileSync("tar", ["-xzf", tarballPath, "-C", tmp, "--strip-components", "1"], { stdio: "inherit" });
+  const extractDir = path.join(tmp, "x");
+  rmSync(extractDir, { recursive: true, force: true });
+  mkdirSync(extractDir, { recursive: true });
+  // bsdtar on macOS/Windows handles zip as well; GNU tar handles tar.gz.
+  execFileSync("tar", ["-xf", archivePath, "-C", extractDir, "--strip-components", "1"], {
+    stdio: "inherit",
+  });
 
-  const nodeBin = path.join(tmp, "bin", "node");
-  const npmSrc = path.join(tmp, "lib", "node_modules", "npm");
+  const nodeBin = path.join(extractDir, ...platform.bin.split("/"));
+  const npmSrc = path.join(extractDir, ...platform.npm.split("/"));
 
   mkdirSync(BIN_DIR, { recursive: true });
   copyFileSync(nodeBin, NODE_BIN_DEST);
-  chmodSync(NODE_BIN_DEST, 0o755);
+  if (os.platform() !== "win32") chmodSync(NODE_BIN_DEST, 0o755);
 
   mkdirSync(NODE_DIST_DIR, { recursive: true });
   rmSync(NPM_DEST, { recursive: true, force: true });
-  execFileSync("cp", ["-R", npmSrc, NPM_DEST], { stdio: "inherit" });
-  chmodSync(path.join(NPM_DEST, "bin", "npm-cli.js"), 0o755);
+  cpSync(npmSrc, NPM_DEST, { recursive: true });
 
   rmSync(tmp, { recursive: true, force: true });
   console.log(`fetch-node: done -> ${NODE_BIN_DEST}`);
