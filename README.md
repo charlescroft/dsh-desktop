@@ -65,10 +65,20 @@ Prerequisites: macOS (Apple Silicon), Xcode, [Rust](https://rustup.rs), Node.js 
 
 ```bash
 npm install            # @tauri-apps/cli, sharp
-npm run fetch:node     # download official Node 24 (arm64) → sidecar + bundled npm
+npm run fetch:node     # download official Node 24 for this host → sidecar + bundled npm
 npm run icon           # regenerate all icon sizes from scripts/app-icon.png (edit the art first)
-npm run build          # .app + .dmg in src-tauri/target/release/bundle/
+npm run build          # bundles in src-tauri/target/release/bundle/
 ```
+
+> macOS note: if the DMG step fails with a Finder AppleScript timeout (`-1712`),
+> run `CI=true npx tauri build` — this skips the Finder window-aesthetics step
+> (the same code path GitHub Actions uses) and produces an identical DMG.
+
+Per-platform targets (local): `npx tauri build --bundles app,dmg` (macOS),
+`--bundles nsis` (Windows), `--bundles deb,appimage` (Linux).
+For other platforms, prefer the GitHub Actions workflow, which builds each OS
+natively: the bundled Node for that platform is fetched by `fetch-node.mjs`
+(host matrix: darwin arm64/x64, win32-x64, linux x64/arm64).
 
 Development mode (uses the system node/npm, hot-reloads Rust):
 

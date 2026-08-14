@@ -72,10 +72,19 @@
 
 ```bash
 npm install            # 安装 @tauri-apps/cli、sharp
-npm run fetch:node     # 下载官方 Node 24 (arm64)，产出 sidecar + 内置 npm
+npm run fetch:node     # 下载官方 Node 24（按当前平台），产出 sidecar + 内置 npm
 npm run icon           # 由 scripts/app-icon.png 生成全套图标（可先改图）
-npm run build          # 产出 src-tauri/target/release/bundle/ 下的 .app 与 .dmg
+npm run build          # 产出 src-tauri/target/release/bundle/ 下的安装包
 ```
+
+> macOS 提示：若 DMG 步骤因 Finder AppleScript 超时（`-1712`）失败，
+> 用 `CI=true npx tauri build` —— 跳过 Finder 窗口美化步骤
+> （与 GitHub Actions 相同的代码路径），产物完全相同。
+
+各平台打包（本地）：`npx tauri build --bundles app,dmg`（macOS）、
+`--bundles nsis`（Windows）、`--bundles deb,appimage`（Linux）。
+其他平台建议直接走 GitHub Actions workflow，由各平台原生构建：
+`fetch-node.mjs` 按宿主平台下载对应 Node（darwin arm64/x64、win32-x64、linux x64/arm64）。
 
 开发模式（使用系统 node/npm，改 Rust 即时生效）：
 
