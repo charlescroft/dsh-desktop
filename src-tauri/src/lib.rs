@@ -730,6 +730,26 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         &[&about, &PredefinedMenuItem::separator(app)?, &quit],
     )?;
+    // Standard Edit menu. On macOS the Cmd+C/V/X/A shortcuts are routed
+    // through menu items, so without these the keyboard copy/paste stops
+    // working in the WebView. Passing `None` text uses the system default
+    // (auto-localized), and the predefined items bind the standard
+    // key equivalents automatically.
+    let edit_title = if zh { "编辑" } else { "Edit" };
+    let edit = Submenu::with_items(
+        app,
+        edit_title,
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
     let service = Submenu::with_items(
         app,
         service_title,
@@ -744,7 +764,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &MenuItem::with_id(app, "open-logs", open_logs, true, None::<&str>)?,
         ],
     )?;
-    Menu::with_items(app, &[&app_menu, &service])
+    Menu::with_items(app, &[&app_menu, &edit, &service])
 }
 
 fn open_folder(path: &Path) {
