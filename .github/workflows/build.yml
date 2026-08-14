@@ -9,6 +9,9 @@ on:
 env:
   CI: true
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
