@@ -381,6 +381,9 @@ impl ServerManager {
             .arg("0")
             .arg("--host")
             .arg("127.0.0.1")
+            // dsh web opens the default browser on start unless told not to;
+            // the WebView IS the UI here, so never hand off to a browser.
+            .arg("--no-open")
             .current_dir(&self.paths.workspace)
             .env("DSH_HOME", &self.paths.dsh_home)
             .env("DSH_DESKTOP", "1")
