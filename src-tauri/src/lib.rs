@@ -7,6 +7,10 @@
 //!   dependency is `@deepseek-ai/dsh`, installed / upgraded on demand
 //! - spawn `dsh --profile web --port 0`, parse the printed URL, and point the
 //!   WebView at it; stop the child when the app quits
+//! - hand the launch token to the WebView through a local http "auth shim"
+//!   page (WKWebView drops dsh's token → cookie redirect when the navigation
+//!   starts from the custom-scheme splash; the shim's same-site iframe gets
+//!   through — see `serve_auth_shim`)
 //! - native menu: check for updates, restart service, open in browser, open
 //!   data/runtime/log dirs
 //! - splash-page IPC (`boot_status`) so first-run installs show progress
@@ -20,6 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, RunEvent, State, Url, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
@@ -193,6 +198,8 @@ pub struct ServerManager {
     child: Mutex<Option<Child>>,
     url: Mutex<Option<String>>,
     status: Mutex<BootStatus>,
+    /// Local http "shim" port (see `ensure_auth_shim`).
+    shim_port: Mutex<Option<u16>>,
 }
 
 impl ServerManager {
@@ -206,6 +213,7 @@ impl ServerManager {
             child: Mutex::new(None),
             url: Mutex::new(None),
             status: Mutex::new(BootStatus::Starting),
+            shim_port: Mutex::new(None),
         }
     }
 
@@ -422,14 +430,72 @@ impl ServerManager {
                     let mgr = app.state::<ServerManager>();
                     *mgr.url.lock().unwrap() = Some(url.clone());
                     mgr.set_status(BootStatus::Ready { url: url.clone() });
-                    mgr.log(&format!("server ready at {url}"));
+                    let shown = match url.split_once("token=") {
+                        Some((base, _)) => format!("{base}token=…"),
+                        None => url.clone(),
+                    };
+                    mgr.log(&format!("server ready at {shown}"));
+
                     let app2 = app.clone();
+                    let url2 = url.clone();
                     let _ = app.run_on_main_thread(move || {
-                        if let Some(w) = app2.get_webview_window("main") {
-                            if let Ok(u) = Url::parse(&url) {
-                                let _ = w.navigate(u);
+                        let Some(w) = app2.get_webview_window("main") else {
+                            return;
+                        };
+                        let mgr = app2.state::<ServerManager>();
+                        let direct_fallback = |mgr: &ServerManager, reason: &str| {
+                            mgr.log(&format!(
+                                "{reason}; navigating the main webview to the token URL"
+                            ));
+                            if let Some(w) = app2.get_webview_window("main") {
+                                if let Ok(u) = Url::parse(&url2) {
+                                    let _ = w.navigate(u);
+                                }
                             }
+                        };
+                        // Route the final hop through the local http shim: the
+                        // WKWebView drops dsh's redirect-minted cookie on any
+                        // navigation that starts from a non-http document (the
+                        // splash) and does not send store-injected cookies on
+                        // top-level navigations — but it does on the shim's
+                        // iframe, whose src (the token URL) re-mints the cookie
+                        // before the UI loads.
+                        match mgr.auth_shim_url(&url2) {
+                            Some(shim_url) => {
+                                mgr.log("navigating via the auth shim");
+                                if let Ok(u) = Url::parse(&shim_url) {
+                                    let _ = w.navigate(u);
+                                }
+                            }
+                            None => direct_fallback(&mgr, "auth shim unavailable"),
                         }
+                        // safety net: if the shim never lands the main webview
+                        // on the server, fall back to the direct token-URL
+                        // navigation (its 401 page recovers itself).
+                        let app3 = app2.clone();
+                        let url3 = url.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_secs(10));
+                            let mgr = app3.state::<ServerManager>();
+                            if mgr.current_url().as_deref() != Some(url3.as_str()) {
+                                return; // this server run is already over
+                            }
+                            let on_server = app3
+                                .get_webview_window("main")
+                                .and_then(|w| w.url().ok())
+                                .map(|u| same_origin(u.as_str(), &url3))
+                                .unwrap_or(false);
+                            if !on_server {
+                                let app4 = app3.clone();
+                                let _ = app3.run_on_main_thread(move || {
+                                    if let Some(w) = app4.get_webview_window("main") {
+                                        if let Ok(u) = Url::parse(&url3) {
+                                            let _ = w.navigate(u);
+                                        }
+                                    }
+                                });
+                            }
+                        });
                     });
                 }
             }
@@ -574,6 +640,151 @@ impl ServerManager {
             .title("DSH Desktop")
             .show(|_| {});
     }
+
+    /// Start (once) a tiny local http server and return its port. WKWebView
+    /// drops dsh's token → cookie redirect on navigations that start from a
+    /// non-http document (the custom-scheme splash), so the auth hand-off
+    /// routes the webview through this shim first: it renders a splash-like
+    /// page that loads the dsh URL in a same-site iframe, where the redirect
+    /// goes through.
+    fn ensure_auth_shim(&self) -> Option<u16> {
+        let mut guard = self.shim_port.lock().unwrap();
+        if let Some(port) = *guard {
+            return Some(port);
+        }
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
+        let port = listener.local_addr().ok()?.port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                serve_auth_shim(stream);
+            }
+        });
+        self.log(&format!("auth shim server listening on 127.0.0.1:{port}"));
+        *guard = Some(port);
+        Some(port)
+    }
+
+    /// The URL of the shim page that forwards to `target`.
+    fn auth_shim_url(&self, target: &str) -> Option<String> {
+        let port = self.ensure_auth_shim()?;
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("go", target)
+            .finish();
+        Some(format!("http://127.0.0.1:{port}/?{query}"))
+    }
+}
+
+/// One shim request: respond with the hop page and close.
+fn serve_auth_shim(mut stream: std::net::TcpStream) {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > 16384 || buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let target = head.split_whitespace().nth(1).unwrap_or("/");
+    let raw_go = target.split("go=").nth(1).unwrap_or("");
+    let go = url::form_urlencoded::parse(raw_go.as_bytes())
+        .next()
+        .map(|(k, _)| k.into_owned())
+        .unwrap_or_default();
+    let body = auth_shim_page(&go);
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(resp.as_bytes());
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+/// The shim page: visually continues the splash, then loads `go` (only ever
+/// a loopback dsh URL the shell itself constructed) in a full-viewport
+/// same-site iframe, through which dsh's token → cookie redirect completes.
+fn auth_shim_page(go: &str) -> String {
+    let go_ok = Url::parse(go)
+        .map(|u| u.scheme() == "http" && u.host_str() == Some("127.0.0.1") && u.path() == "/")
+        .unwrap_or(false);
+    let go_literal = if go_ok {
+        format!("{}", serde_json::to_string(go).unwrap_or_default())
+    } else {
+        "null".to_string()
+    };
+    format!(
+        r#"<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body {{ height: 100%; margin: 0; }}
+  body {{
+    background: radial-gradient(1200px 800px at 30% 20%, #1e3a8a 0%, #0f172a 55%, #020617 100%);
+    color: #e2e8f0;
+    display: flex; align-items: center; justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px; user-select: none;
+  }}
+</style>
+</head>
+<body>
+<div id="status">Opening DeepSeek Harness…</div>
+<script>
+(function () {{
+  var go = {go_literal};
+  var zh = (navigator.language || "").toLowerCase().indexOf("zh") === 0;
+  document.getElementById("status").textContent = zh
+    ? "正在打开 DeepSeek Harness 界面…"
+    : "Opening DeepSeek Harness…";
+  if (!go) return;
+  document.getElementById("status").style.display = "none";
+  var f = document.createElement("iframe");
+  f.src = go;
+  f.style.cssText = "position:fixed;inset:0;width:100%;height:100%;border:0";
+  document.body.appendChild(f);
+}})();
+</script>
+</body>
+</html>
+"#
+    )
+}
+
+/// Same-origin comparison (scheme + host + port) of two URL strings.
+fn same_origin(a: &str, b: &str) -> bool {
+    match (Url::parse(a), Url::parse(b)) {
+        (Ok(a), Ok(b)) => a.origin().ascii_serialization() == b.origin().ascii_serialization(),
+        _ => false,
+    }
+}
+
+/// Safety net for the main webview: when it ends up on dsh's 401 page (e.g.
+/// the auth shim was unavailable and the shell fell back to the direct
+/// navigation), re-navigating to the token URL from that http page mints the
+/// cookie and loads the UI. The check is a no-op on the UI itself.
+fn recover_webview_auth(webview: &tauri::Webview<tauri::Wry>, page_url: &str) {
+    let mgr = webview.state::<ServerManager>();
+    let server_url = match mgr.current_url() {
+        Some(u) => u,
+        None => return,
+    };
+    if !same_origin(&server_url, page_url) || page_url.contains("token=") {
+        return;
+    }
+    let script = format!(
+        "if(document.body&&document.body.innerText.indexOf('dsh web authentication required')!==-1)location.replace('{}');",
+        server_url
+    );
+    let _ = webview.eval(&script);
 }
 
 fn append_line(file: &Path, line: &str) {
@@ -822,6 +1033,21 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .menu(build_menu)
+        .on_page_load(|webview, payload| {
+            if payload.event() != PageLoadEvent::Finished {
+                return;
+            }
+            let page_url = payload.url().to_string();
+            if page_url.starts_with("http") {
+                let label = webview.label().to_string();
+                // never write launch tokens to the log: drop the query string
+                let shown = page_url.split('?').next().unwrap_or(&page_url).to_string();
+                webview
+                    .state::<ServerManager>()
+                    .log(&format!("page loaded [{label}]: {shown}"));
+                recover_webview_auth(webview, &page_url);
+            }
+        })
         .on_menu_event(|app, event| {
             handle_menu_event(app, event.id().as_ref());
         })
