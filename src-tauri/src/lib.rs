@@ -198,6 +198,8 @@ pub struct ServerManager {
     child: Mutex<Option<Child>>,
     url: Mutex<Option<String>>,
     status: Mutex<BootStatus>,
+    /// dsh ui-theme preference (light | dark | system), from ~/.dsh/settings.yaml.
+    theme: String,
     /// Local http "shim" port (see `ensure_auth_shim`).
     shim_port: Mutex<Option<u16>>,
 }
@@ -206,6 +208,7 @@ impl ServerManager {
     pub fn new(app: AppHandle) -> Self {
         let paths = Paths::resolve(&app);
         fs::create_dir_all(&paths.logs).ok();
+        let theme = read_theme_preference(&paths.dsh_home);
         Self {
             app,
             paths,
@@ -213,6 +216,7 @@ impl ServerManager {
             child: Mutex::new(None),
             url: Mutex::new(None),
             status: Mutex::new(BootStatus::Starting),
+            theme,
             shim_port: Mutex::new(None),
         }
     }
@@ -654,9 +658,10 @@ impl ServerManager {
         }
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
         let port = listener.local_addr().ok()?.port();
+        let theme = self.theme.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                serve_auth_shim(stream);
+                serve_auth_shim(stream, &theme);
             }
         });
         self.log(&format!("auth shim server listening on 127.0.0.1:{port}"));
@@ -675,7 +680,7 @@ impl ServerManager {
 }
 
 /// One shim request: respond with the hop page and close.
-fn serve_auth_shim(mut stream: std::net::TcpStream) {
+fn serve_auth_shim(mut stream: std::net::TcpStream, theme: &str) {
     use std::io::Read;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -698,7 +703,7 @@ fn serve_auth_shim(mut stream: std::net::TcpStream) {
         .next()
         .map(|(k, _)| k.into_owned())
         .unwrap_or_default();
-    let body = auth_shim_page(&go);
+    let body = auth_shim_page(&go, theme);
     let resp = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
@@ -713,7 +718,7 @@ fn serve_auth_shim(mut stream: std::net::TcpStream) {
 /// polling script, plus a hop script that loads `go` (only ever a loopback
 /// dsh URL the shell itself constructed) in a full-viewport same-site
 /// iframe, through which dsh's token → cookie redirect completes.
-fn auth_shim_page(go: &str) -> String {
+fn auth_shim_page(go: &str, theme: &str) -> String {
     let go_ok = Url::parse(go)
         .map(|u| u.scheme() == "http" && u.host_str() == Some("127.0.0.1") && u.path() == "/")
         .unwrap_or(false);
@@ -722,16 +727,28 @@ fn auth_shim_page(go: &str) -> String {
     } else {
         "null".to_string()
     };
-    // drop the splash's own <script> block (its boot_status polling needs
-    // Tauri IPC, which this page does not have) and keep markup + styles
-    let markup = match include_str!("../../ui/index.html").split_once("<script>") {
-        Some((head, _)) => head.to_string(),
-        None => include_str!("../../ui/index.html").to_string(),
+    // drop only the splash's main <script> block (its boot_status polling
+    // needs Tauri IPC, which this page does not have) and keep everything
+    // else — markup, styles, and the pre-paint theme bootstrap
+    let full = include_str!("../../ui/index.html");
+    let markup = match full.rfind("<script>") {
+        Some(i) => format!("{}\n  </body>\n</html>\n", &full[..i]),
+        None => full.to_string(),
     };
     let hop = format!(
         r#"<script>
       (function () {{
         var go = {go_literal};
+        var preference = {theme_literal};
+        var dark =
+          preference === "dark" ||
+          (preference !== "light" &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        if (dark) {{
+          document.body.setAttribute("data-ds-dark-theme", "");
+        }} else {{
+          document.body.removeAttribute("data-ds-dark-theme");
+        }}
         var zh = (navigator.language || "en").toLowerCase().startsWith("zh");
         document.documentElement.lang = zh ? "zh-CN" : "en";
         var statusEl = document.getElementById("status");
@@ -748,7 +765,8 @@ fn auth_shim_page(go: &str) -> String {
   </body>
 </html>
 "#,
-        go_literal = go_literal
+        go_literal = go_literal,
+        theme_literal = serde_json::to_string(theme).unwrap_or_else(|_| "\"system\"".to_string())
     );
     markup + &hop
 }
@@ -779,6 +797,40 @@ fn recover_webview_auth(webview: &tauri::Webview<tauri::Wry>, page_url: &str) {
         server_url
     );
     let _ = webview.eval(&script);
+}
+
+/// Read dsh's ui-theme preference from `~/.dsh/settings.yaml`:
+/// the `ui-theme:` block's `preference:` field (light | dark | system;
+/// default system, matching dsh's own default).
+fn read_theme_preference(dsh_home: &Path) -> String {
+    let Ok(text) = fs::read_to_string(dsh_home.join("settings.yaml")) else {
+        return "system".to_string();
+    };
+    let mut in_block = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("ui-theme:") {
+            in_block = true;
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            if trimmed.is_empty() {
+                continue;
+            }
+            break; // next top-level key: the ui-theme block ended
+        }
+        if let Some(value) = trimmed.strip_prefix("preference:") {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            match value {
+                "light" | "dark" | "system" => return value.to_string(),
+                _ => break,
+            }
+        }
+    }
+    "system".to_string()
 }
 
 fn append_line(file: &Path, line: &str) {
@@ -883,9 +935,36 @@ fn check_update(app: AppHandle, silent: bool) {
 // Commands (splash page IPC)
 // ---------------------------------------------------------------------------
 
+/// Boot status plus the dsh theme preference, flattened into one object:
+/// `{ phase: "starting" | ..., theme: "light" | "dark" | "system" }`.
+#[derive(Serialize)]
+struct BootStatusReport {
+    #[serde(flatten)]
+    status: BootStatus,
+    theme: String,
+}
+
 #[tauri::command]
-fn boot_status(state: State<'_, ServerManager>) -> BootStatus {
-    state.status()
+fn boot_status(state: State<'_, ServerManager>) -> BootStatusReport {
+    BootStatusReport {
+        status: state.status(),
+        theme: state.theme.clone(),
+    }
+}
+
+/// Paint the window background in the resolved dsh theme so every blank
+/// moment (first paint, navigation gaps) matches the splash and the dsh UI.
+#[tauri::command]
+fn set_window_theme(app: AppHandle, dark: bool) {
+    let color = tauri::utils::config::Color(
+        if dark { 0x15 } else { 0xff },
+        if dark { 0x15 } else { 0xff },
+        if dark { 0x15 } else { 0x17 },
+        0xff,
+    );
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_background_color(Some(color));
+    }
 }
 
 #[tauri::command]
@@ -1040,6 +1119,22 @@ pub fn run() {
                     .state::<ServerManager>()
                     .log(&format!("page loaded [{label}]: {shown}"));
                 recover_webview_auth(webview, &page_url);
+            } else if page_url.starts_with("tauri") || page_url.starts_with("http://tauri.localhost")
+            {
+                // Reveal the window only once the THEMED splash finished
+                // loading: the config-created window starts on the un-themed
+                // splash and the shell immediately re-navigates with
+                // `?theme=…`, so showing on the first load would flash the
+                // wrong theme.
+                if webview.label() == "main" && page_url.contains("theme=") {
+                    webview
+                        .state::<ServerManager>()
+                        .log(&format!("themed splash ready: {page_url}"));
+                    if let Some(w) = webview.app_handle().get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
             }
         })
         .on_menu_event(|app, event| {
@@ -1056,6 +1151,25 @@ pub fn run() {
             let app = app.handle().clone();
             let mgr = ServerManager::new(app.clone());
             app.manage(mgr);
+
+            // Load the splash with the dsh theme preference baked into the
+            // URL (the window stays hidden until the page finishes loading),
+            // so the very first visible frame already matches dsh's theme.
+            let theme = app.state::<ServerManager>().theme.clone();
+            if let Some(w) = app.get_webview_window("main") {
+                let themed = format!("{}?theme={}", splash_url(), theme);
+                if let Ok(u) = Url::parse(&themed) {
+                    let _ = w.navigate(u);
+                }
+                // safety net: never leave the window hidden
+                let app_show = app.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(5));
+                    if let Some(w) = app_show.get_webview_window("main") {
+                        let _ = w.show();
+                    }
+                });
+            }
 
             let app_start = app.clone();
             let app_update = app.clone();
@@ -1086,7 +1200,11 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![boot_status, open_in_browser])
+        .invoke_handler(tauri::generate_handler![
+            boot_status,
+            open_in_browser,
+            set_window_theme
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
