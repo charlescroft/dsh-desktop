@@ -708,55 +708,49 @@ fn serve_auth_shim(mut stream: std::net::TcpStream) {
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
-/// The shim page: visually continues the splash, then loads `go` (only ever
-/// a loopback dsh URL the shell itself constructed) in a full-viewport
-/// same-site iframe, through which dsh's token → cookie redirect completes.
+/// The shim page: the very same splash markup as `ui/index.html` (kept in
+/// sync automatically via `include_str!`), minus the splash's Tauri-IPC
+/// polling script, plus a hop script that loads `go` (only ever a loopback
+/// dsh URL the shell itself constructed) in a full-viewport same-site
+/// iframe, through which dsh's token → cookie redirect completes.
 fn auth_shim_page(go: &str) -> String {
     let go_ok = Url::parse(go)
         .map(|u| u.scheme() == "http" && u.host_str() == Some("127.0.0.1") && u.path() == "/")
         .unwrap_or(false);
     let go_literal = if go_ok {
-        format!("{}", serde_json::to_string(go).unwrap_or_default())
+        serde_json::to_string(go).unwrap_or_default()
     } else {
         "null".to_string()
     };
-    format!(
-        r#"<!doctype html>
-<html>
-<head>
-<meta charset="utf-8" />
-<style>
-  html, body {{ height: 100%; margin: 0; }}
-  body {{
-    background: radial-gradient(1200px 800px at 30% 20%, #1e3a8a 0%, #0f172a 55%, #020617 100%);
-    color: #e2e8f0;
-    display: flex; align-items: center; justify-content: center;
-    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
-    font-size: 14px; user-select: none;
-  }}
-</style>
-</head>
-<body>
-<div id="status">Opening DeepSeek Harness…</div>
-<script>
-(function () {{
-  var go = {go_literal};
-  var zh = (navigator.language || "").toLowerCase().indexOf("zh") === 0;
-  document.getElementById("status").textContent = zh
-    ? "正在打开 DeepSeek Harness 界面…"
-    : "Opening DeepSeek Harness…";
-  if (!go) return;
-  document.getElementById("status").style.display = "none";
-  var f = document.createElement("iframe");
-  f.src = go;
-  f.style.cssText = "position:fixed;inset:0;width:100%;height:100%;border:0";
-  document.body.appendChild(f);
-}})();
-</script>
-</body>
+    // drop the splash's own <script> block (its boot_status polling needs
+    // Tauri IPC, which this page does not have) and keep markup + styles
+    let markup = match include_str!("../../ui/index.html").split_once("<script>") {
+        Some((head, _)) => head.to_string(),
+        None => include_str!("../../ui/index.html").to_string(),
+    };
+    let hop = format!(
+        r#"<script>
+      (function () {{
+        var go = {go_literal};
+        var zh = (navigator.language || "en").toLowerCase().startsWith("zh");
+        document.documentElement.lang = zh ? "zh-CN" : "en";
+        var statusEl = document.getElementById("status");
+        statusEl.textContent = zh
+          ? "服务已就绪，正在打开界面…"
+          : "Service ready, opening the interface…";
+        if (!go) return;
+        var frame = document.createElement("iframe");
+        frame.src = go;
+        frame.style.cssText = "position:fixed;inset:0;width:100%;height:100%;border:0";
+        document.body.appendChild(frame);
+      }})();
+    </script>
+  </body>
 </html>
-"#
-    )
+"#,
+        go_literal = go_literal
+    );
+    markup + &hop
 }
 
 /// Same-origin comparison (scheme + host + port) of two URL strings.
